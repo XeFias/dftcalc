@@ -3,8 +3,8 @@ set (bcg2jani_VERSION_MAJOR 1)
 set (bcg2jani_VERSION_MINOR 3)
 set (bcg2jani_VERSION_PATCH 3)
 
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=c99 -Wall -Wextra")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++14 -Wall -Wextra")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=c99 -Wall -Wextra -no-pie")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++14 -Wall -Wextra -no-pie")
 
 include_directories($ENV{CADP}/incl)
 
