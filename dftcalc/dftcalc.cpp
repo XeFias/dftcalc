@@ -350,6 +350,7 @@ static bool hasImpossibleLabel(const File& file) {
 int DFT::DFTCalc::calcModular(const bool reuse,
                               const std::string& cwd,
                               const File& dftOriginal,
+                              const File& autOriginal,
                               const std::vector<Query> &queries,
                               enum DFT::checker useChecker,
                               enum DFT::converter useConverter,
@@ -389,7 +390,7 @@ int DFT::DFTCalc::calcModular(const bool reuse,
 	std::string modules;
 	std::swap(modules, *tmp);
 	delete tmp;
-	return checkModule(reuse, cwd, dftOriginal, queries, useChecker,
+	return checkModule(reuse, cwd, dftOriginal, autOriginal, queries, useChecker,
 	                   useConverter, warnNonDeterminism, ret, expOnly, modules);
 }
 
@@ -457,6 +458,7 @@ static void addVoteResults(std::vector<DFT::DFTCalculationResultItem> &ret,
 int DFT::DFTCalc::checkModule(const bool reuse,
                               const std::string& cwd,
                               const File& dft,
+                              const File& aut,
                               const std::vector<Query> &queries,
                               enum DFT::checker useChecker,
                               enum DFT::converter useConverter,
@@ -475,7 +477,7 @@ int DFT::DFTCalc::checkModule(const bool reuse,
 	if (module[0] == 'M') {
 		std::string root = module.substr(1, eol - 1);
 		module = module.substr(eol + 1);
-		return calculateDFT(reuse, cwd, dft, queries, useChecker,
+		return calculateDFT(reuse, cwd, dft, aut, queries, useChecker,
 		                    useConverter, warnNonDeterminism, root, ret,
 		                    expOnly);
 	} else if (module[0] == '=') {
@@ -515,7 +517,7 @@ int DFT::DFTCalc::checkModule(const bool reuse,
 			messageFormatter->reportError("Modules contains too few entries for module.");
 			return 1;
 		}
-		if (checkModule(reuse, cwd, dft, queries, useChecker, useConverter,
+		if (checkModule(reuse, cwd, dft, aut, queries, useChecker, useConverter,
 		                warnNonDeterminism, tmp, expOnly, module))
 			return 1;
 		if (op == '/') {
@@ -563,20 +565,37 @@ int DFT::DFTCalc::checkModule(const bool reuse,
 int DFT::DFTCalc::calculateDFT(const bool reuse,
                                const std::string& cwd,
                                const File& dftOriginal,
+                               const File& autOriginal,
                                const std::vector<Query> &queries,
                                enum DFT::checker useChecker,
                                enum DFT::converter useConverter,
                                bool warnNonDeterminism,
 							   std::string root,
                                DFT::DFTCalculationResult &ret,
-                               bool expOnly)
+                               bool expOnly
+                              )
 {
-	File dft    = dftOriginal.newWithPathTo(cwd);
+	File autIn;
+	File dft;
+	if ( FileSystem::exists(autOriginal) ){
+		autIn  = autOriginal.newWithPathTo(cwd);
+		dft    = autOriginal.newWithPathTo(cwd);
+	} else {
+		dft    = dftOriginal.newWithPathTo(cwd);
+	}
+	
+	std::string autFileName = autIn.getFileBase();
+	if (!root.empty()) {
+		autFileName += "@" + root;
+		autIn = File(cwd, autFileName, "aut");
+	}
+	
 	std::string dftFileName = dft.getFileBase();
 	if (!root.empty()) {
 		dftFileName += "@" + root;
 		dft = File(cwd, dftFileName, "dft");
 	}
+	
 	File svl    = dft.newWithExtension("svl");
 	File svlLog = dft.newWithExtension("log");
 	File exp    = dft.newWithExtension("exp");
@@ -594,7 +613,7 @@ int DFT::DFTCalc::calculateDFT(const bool reuse,
 	File png    = dot.newWithExtension("png");
 	File input  = dft.newWithExtension("input");
 	File inputImca  = dft.newWithExtension("inputImca");
-
+	
 	Shell::RunStatistics stats;
 
 	FileSystem::mkdir(File(cwd));
@@ -621,67 +640,76 @@ int DFT::DFTCalc::calculateDFT(const bool reuse,
 	CommandExecutor exec(messageFormatter, cwd, dftFileName);
 	this->exec = &exec;
 	int com = 0;
+	
+	std::string expContents="";
+	
+    /* translate form *.aut */
+	if( !FileSystem::exists(autOriginal) ) {
+		if(!reuse || !FileSystem::exists(dft)) {
+			messageFormatter->reportAction("Canonicalizing DFT...",VERBOSITY_FLOW);
+			std::stringstream ss;
+			ss << dft2lntcExec.getFilePath()
+			<< " --verbose=" << messageFormatter->getVerbosity()
+			<< " -t \"" + dft.getFileRealPath() << "\"";
+			if (root != "")
+				ss << " -r \"" << root << "\"";
+			ss << " \""    + dftOriginal.getFileRealPath() + "\"";
+			if (exec.runCommand(ss.str(), "dft2lntc", dft) == "")
+				return 1;
+		} else {
+			messageFormatter->reportAction("Reusing copy of original dft file",VERBOSITY_FLOW);
+		}
 
-	if(!reuse || !FileSystem::exists(dft)) {
-		messageFormatter->reportAction("Canonicalizing DFT...",VERBOSITY_FLOW);
-		std::stringstream ss;
-		ss << dft2lntcExec.getFilePath()
-		   << " --verbose=" << messageFormatter->getVerbosity()
-		   << " -t \"" + dft.getFileRealPath() << "\"";
-		if (root != "")
-			ss << " -r \"" << root << "\"";
-        ss << " \""    + dftOriginal.getFileRealPath() + "\"";
-		if (exec.runCommand(ss.str(), "dft2lntc", dft) == "")
-			return 1;
-	} else {
-		messageFormatter->reportAction("Reusing copy of original dft file",VERBOSITY_FLOW);
-	}
+		if (root == "")
+			messageFormatter->notify("Calculating `"+dftFileName+"'");
 
-	if (root == "")
-		messageFormatter->notify("Calculating `"+dftFileName+"'");
-
-	if(!reuse || !FileSystem::exists(exp) || !FileSystem::exists(svl)) {
-		// dft -> exp, svl
-		messageFormatter->reportAction("Translating DFT to EXP...",VERBOSITY_FLOW);
-		std::stringstream ss;
-		ss << dft2lntcExec.getFilePath()
-		   << " --verbose=" << messageFormatter->getVerbosity()
-		   << " -s \"" + svl.getFileRealPath() + "\""
-		   << " -x \"" + exp.getFileRealPath() + "\""
-		   << " -b \"" + bcg.getFileRealPath() + "\""
-		   << " -n \"" + dftOriginal.getFileRealPath() + "\"";
-		   //<< " \""    + dft.getFileRealPath() + "\"";
-		//   << " --warn-code";
-		if(!evidence.empty()) {
-			ss << " -e \"";
-			for(std::string e: evidence) {
-				ss << e << ",";
+		if(!reuse || !FileSystem::exists(exp) || !FileSystem::exists(svl)) {
+			// dft -> exp, svl
+			messageFormatter->reportAction("Translating DFT to EXP...",VERBOSITY_FLOW);
+			std::stringstream ss;
+			ss << dft2lntcExec.getFilePath()
+			<< " --verbose=" << messageFormatter->getVerbosity()
+			<< " -s \"" + svl.getFileRealPath() + "\""
+			<< " -x \"" + exp.getFileRealPath() + "\""
+			<< " -b \"" + bcg.getFileRealPath() + "\""
+			<< " -n \"" + dftOriginal.getFileRealPath() + "\"";
+			//<< " \""    + dft.getFileRealPath() + "\"";
+			//   << " --warn-code";
+			if(!evidence.empty()) {
+				ss << " -e \"";
+				for(std::string e: evidence) {
+					ss << e << ",";
+				}
+				ss << "\"";
 			}
-			ss << "\"";
-        }
-		if (!messageFormatter->usingColoredMessages())
-			ss << " --no-color";
-        ss << " \""    + dft.getFileRealPath() + "\"";
-		std::vector<File> outputs;
-		outputs.push_back(exp);
-		outputs.push_back(svl);
-		if (exec.runCommand(ss.str(), "dft2lntc", outputs) == "")
-			return 1;
-	} else {
-		messageFormatter->reportAction("Reusing DFT to EXP translation result",VERBOSITY_FLOW);
-	}
+			if (!messageFormatter->usingColoredMessages())
+				ss << " --no-color";
+			ss << " \""    + dft.getFileRealPath() + "\"";
+			std::vector<File> outputs;
+			outputs.push_back(exp);
+			outputs.push_back(svl);
+			if (exec.runCommand(ss.str(), "dft2lntc", outputs) == "")
+				return 1;
+		} else {
+			messageFormatter->reportAction("Reusing DFT to EXP translation result",VERBOSITY_FLOW);
+		}
 
-	if (expOnly)
-		return 0;
+		if (expOnly)
+			return 0;
 
-	std::string* tmpContents = FileSystem::load(exp);
-	if (cachedResults.find(*tmpContents) != cachedResults.end()) {
-		ret = cachedResults[*tmpContents];
+		std::string* tmpContents = FileSystem::load(exp);
+		if (cachedResults.find(*tmpContents) != cachedResults.end()) {
+			ret = cachedResults[*tmpContents];
+			delete tmpContents;
+			return 0;
+		}
+		std::string expContents = *tmpContents;
 		delete tmpContents;
-		return 0;
+
 	}
-	std::string expContents = *tmpContents;
-	delete tmpContents;
+	else {
+		
+	}
 
 	if (useConverter == DFT::converter::SVL) {
 #ifndef HAVE_CADP
@@ -689,13 +717,28 @@ int DFT::DFTCalc::calculateDFT(const bool reuse,
 		return 1;
 #else
 		if (!reuse || !FileSystem::exists(bcg)) {
-			// svl, exp -> bcg
-			messageFormatter->reportAction("Building IMC...",VERBOSITY_FLOW);
-			std::string command = svlExec.getFilePath() + " \"" + svl.getFileRealPath() + "\"";
+			std::string command;
 
-			if (exec.runCommand(command, "svl", bcg) == "")
-				return 1;
+			if(FileSystem::exists(autOriginal)){
+				// aut -> bcg
+				messageFormatter->reportAction("Building IMC from AUT...",VERBOSITY_FLOW);
+				command = bcgioExec.getFilePath() + " \"" + autOriginal.getFileRealPath() + "\" \"" + bcg.getFileRealPath() + "\"";
+				
+				
+				if (exec.runCommand(command, "bcg_io", bcg) == "") {
+					messageFormatter->notify("ran UNsuccessfull");
+					return 1;
+				}
+				messageFormatter->notify("ran successfull");
 
+			} else {
+				// svl, exp -> bcg
+				messageFormatter->reportAction("Building IMC from SVL...",VERBOSITY_FLOW);
+				command = svlExec.getFilePath() + " \"" + svl.getFileRealPath() + "\"";
+				if (exec.runCommand(command, "svl", bcg) == "")
+					return 1;
+			}
+			
 			messageFormatter->reportAction("Applying maximal progress to IMC...",VERBOSITY_FLOW);
 			command = maxprogExec.getFilePath() + " \"" + bcg.getFileRealPath() + "\" \"" + aut.getFileRealPath() + "\" FAIL ONLINE";
 
@@ -963,6 +1006,8 @@ int main(int argc, char** argv) {
 	int    yamlFileSet        = 0;
 	string csvFileName        = "";
 	int    csvFileSet         = 0;
+	string autFileName        = "";
+	int    autFileSet         = 0;
 	string dotToType          = "png";
 	int    dotToTypeSet       = 0;
 	string outputFolder       = "output";
@@ -995,7 +1040,7 @@ int main(int argc, char** argv) {
 
 	/* Parse command line arguments */
 	char c;
-	while( (c = getopt(argc,argv,"C:e:E:f:mMpqr:Rc:st:ui:I:hxv-:")) >= 0 ) {
+	while( (c = getopt(argc,argv,"C:e:E:f:a:mMpqr:Rc:st:ui:I:hxv-:")) >= 0 ) {
 		switch(c) {
 			
 			// -C FILE
@@ -1014,7 +1059,16 @@ int main(int argc, char** argv) {
 					yamlFileSet = 1;
 				}
 				break;
-			
+			// -a FILE
+			case 'a':
+				if(strlen(optarg)==1 && optarg[0]=='-') {
+					autFileName = "";
+					autFileSet = 1;
+				} else {
+					autFileName = string(optarg);
+					autFileSet = 1;
+				}
+				break;
 			// -c FILE
 			case 'c':
 				if(strlen(optarg)==1 && optarg[0]=='-') {
@@ -1387,6 +1441,7 @@ int main(int argc, char** argv) {
 		}
 	}
 	
+	
 	/* Enable Shell messages */
 	Shell::messageFormatter = messageFormatter;
 	
@@ -1415,19 +1470,22 @@ int main(int argc, char** argv) {
 	/// A map containing the results of the calculation. <filename> --> <result>
 	map<std::string,DFT::DFTCalculationResult> results;
 		
-	/* Calculate DFTs */
+	/* Calculate AUT */
 	bool hasInput = false;
 	bool hasErrors = false;
-	for(File dft: dfts) {
-		hasInput = true;
-		if(FileSystem::exists(dft)) {
+	File dft;
+	File aut;
+	if (autFileSet) {
+		aut = File(autFileName).fix();
+		/* Calculate AUT */
+		if(FileSystem::exists(autFileName)) {
 			DFT::DFTCalculationResult ret;
 			bool res;
 			try {
 				if (!modularize) {
-					res = calc.calculateDFT(reuse, outputFolderFile.getFileRealPath(),dft, queries, useChecker, useConverter, warnNonDeterminism, "", ret, expOnly);
+					res = calc.calculateDFT(reuse, outputFolderFile.getFileRealPath(),dft, aut, queries, useChecker, useConverter, warnNonDeterminism, "", ret, expOnly);
 				} else {
-					res = calc.calcModular(reuse, outputFolderFile.getFileRealPath(),dft, queries, useChecker, useConverter, warnNonDeterminism, ret, expOnly);
+					messageFormatter->reportError("Not implemented!");
 				}
 			} catch (std::exception &e) {
 				messageFormatter->reportError(e.what());
@@ -1435,9 +1493,32 @@ int main(int argc, char** argv) {
 			results[dft.getFileName()] = ret;
 			hasErrors = hasErrors || res;
 		} else {
-			messageFormatter->reportError("DFT File `" + dft.getFileRealPath() + "' does not exist");
+			messageFormatter->reportError("AUT File `" + aut.getFileRealPath() + "' does not exist");
+		}
+	} else {
+		/* Calculate DFTs */
+		for(File dft: dfts) {
+			hasInput = true;
+			if(FileSystem::exists(dft)) {
+				DFT::DFTCalculationResult ret;
+				bool res;
+				try {
+					if (!modularize) {
+						res = calc.calculateDFT(reuse, outputFolderFile.getFileRealPath(),dft, aut, queries, useChecker, useConverter, warnNonDeterminism, "", ret, expOnly);
+					} else {
+						res = calc.calcModular(reuse, outputFolderFile.getFileRealPath(),dft, aut, queries, useChecker, useConverter, warnNonDeterminism, ret, expOnly);
+					}
+				} catch (std::exception &e) {
+					messageFormatter->reportError(e.what());
+				}
+				results[dft.getFileName()] = ret;
+				hasErrors = hasErrors || res;
+			} else {
+				messageFormatter->reportError("DFT File `" + dft.getFileRealPath() + "' does not exist");
+			}
 		}
 	}
+	
 	workdir.popd();
 	if (expOnly)
 		return 0;
